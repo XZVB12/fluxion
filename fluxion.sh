@@ -22,7 +22,7 @@ readonly FLUXIONNoiseFloor=-90
 readonly FLUXIONNoiseCeiling=-60
 
 readonly FLUXIONVersion=6
-readonly FLUXIONRevision=5
+readonly FLUXIONRevision=9
 
 # Declare window ration bigger = smaller windows
 FLUXIONWindowRatio=4
@@ -88,7 +88,7 @@ source "$FLUXIONLibPath/HelpUtils.sh"
 # =================== < Parse Parameters > =================== #
 # ============================================================ #
 if ! FLUXIONCLIArguments=$(
-    getopt --options="vdk5rinmtbhe:c:l:a:r" \
+    getopt --options="vdk5rinmthb:e:c:l:a:r" \
       --longoptions="debug,version,killer,5ghz,installer,reloader,help,airmon-ng,multiplexer,target,test,auto,bssid:,essid:,channel:,language:,attack:,ratio,skip-dependencies" \
       --name="FLUXION V$FLUXIONVersion.$FLUXIONRevision" -- "$@"
   ); then
@@ -121,7 +121,7 @@ while [ "$1" != "" ] && [ "$1" != "--" ]; do
     -n|--airmon-ng) readonly FLUXIONAirmonNG=1;;
     -m|--multiplexer) readonly FLUXIONTMux=1;;
     -b|--bssid) FluxionTargetMAC=$2; shift;;
-    -e|--essid) FluxionTargetSSID=$2; shift;
+    -e|--essid) FluxionTargetSSID=$2;
       # TODO: Rearrange declarations to have routines available for use here.
       FluxionTargetSSIDClean=$(echo "$FluxionTargetSSID" | sed -r 's/( |\/|\.|\~|\\)+/_/g'); shift;;
     -c|--channel) FluxionTargetChannel=$2; shift;;
@@ -172,11 +172,11 @@ fi
 
 # FLUXIONDebug [Normal Mode "" / Developer Mode 1]
 if [ $FLUXIONDebug ]; then
-  :> /tmp/fluxion_debug_log
-  readonly FLUXIONOutputDevice="/tmp/fluxion_debug_log"
+  :> /tmp/fluxion.debug.log
+  readonly FLUXIONOutputDevice="/tmp/fluxion.debug.log"
   readonly FLUXIONHoldXterm="-hold"
 else
-  readonly FLUXIONOutputDevice="/dev/null"
+  readonly FLUXIONOutputDevice=/dev/null
   readonly FLUXIONHoldXterm=""
 fi
 
@@ -270,9 +270,10 @@ fluxion_startup() {
   if installer_utils_check_update "https://$fluxionDomain/$fluxionPath" \
     "FLUXIONVersion=" "FLUXIONRevision=" \
     $FLUXIONVersion $FLUXIONRevision; then
-    installer_utils_run_update "https://$updateDomain/$updatePath" \
-      "FLUXION-V$FLUXIONVersion.$FLUXIONRevision" "$FLUXIONPath"
-    fluxion_shutdown
+    if installer_utils_run_update "https://$updateDomain/$updatePath" \
+      "FLUXION-V$FLUXIONVersion.$FLUXIONRevision" "$FLUXIONPath"; then
+      fluxion_shutdown
+    fi
   fi
 
   echo # Do not remove.
@@ -281,7 +282,7 @@ fluxion_startup() {
     "aircrack-ng" "bc" "awk:awk|gawk|mawk"
     "curl" "cowpatty" "dhcpd:isc-dhcp-server|dhcp" "7zr:p7zip" "hostapd" "lighttpd"
     "iwconfig:wireless-tools" "macchanger" "mdk4" "dsniff" "mdk3" "nmap" "openssl"
-    "php-cgi" "pyrit" "xterm" "rfkill" "unzip" "route:net-tools"
+    "php-cgi" "xterm" "rfkill" "unzip" "route:net-tools"
     "fuser:psmisc" "killall:psmisc"
   )
 
@@ -398,6 +399,36 @@ fluxion_shutdown() {
   clear
 
   exit 0
+}
+
+
+# ============================================================ #
+# ================== < Helper Subroutines > ================== #
+# ============================================================ #
+# The following will kill the parent proces & all its children.
+fluxion_kill_lineage() {
+  if [ ${#@} -lt 1 ]; then return -1; fi
+
+  if [ ! -z "$2" ]; then
+    local -r options=$1
+    local match=$2
+  else
+    local -r options=""
+    local match=$1
+  fi
+
+  # Check if the match isn't a number, but a regular expression.
+  # The following might
+  if ! [[ "$match" =~ ^[0-9]+$ ]]; then
+    match=$(pgrep -f $match 2> $FLUXIONOutputDevice)
+  fi
+
+  # Check if we've got something to kill, abort otherwise.
+  if [ -z "$match" ]; then return -2; fi
+
+  kill $options $(pgrep -P $match 2> $FLUXIONOutputDevice) \
+    &> $FLUXIONOutputDevice
+  kill $options $match &> $FLUXIONOutputDevice
 }
 
 
@@ -1547,11 +1578,16 @@ fluxion_hash_verify() {
     fluxion_target_show
 
     local choices=( \
-      "$FLUXIONHashVerificationMethodPyritOption" \
       "$FLUXIONHashVerificationMethodAircrackOption" \
       "$FLUXIONHashVerificationMethodCowpattyOption" \
-      "$FLUXIONGeneralBackOption" \
     )
+
+    # Add pyrit to the options is available.
+    if [ -x "$(command -v pyrit)" ]; then
+      choices+=("$FLUXIONHashVerificationMethodPyritOption")
+    fi
+
+    options+=("$FLUXIONGeneralBackOption")
 
     io_query_choice "" choices[@]
 
@@ -1612,6 +1648,7 @@ fluxion_hash_set_path() {
   # If one exists, ask users if they'd like to use it.
   if [ "$hashPath" -a -f "$hashPath" -a -s "$hashPath" ]; then
     if [ "$FLUXIONAuto" ]; then
+      echo "Using default hash path: $hashPath" > $FLUXIONOutputDevice
       FluxionHashPath=$hashPath
       return
     else
@@ -1661,6 +1698,8 @@ fluxion_hash_set_path() {
     # Notice: Path is cleared if we return, no need to unset.
     if [ ! "$FluxionHashPath" ]; then return 1; fi
 
+    echo "Path given: \"$FluxionHashPath\"" > $FLUXIONOutputDevice
+
     # Make sure the path points to a valid generic file.
     if [ ! -f "$FluxionHashPath" -o ! -s "$FluxionHashPath" ]; then
       echo -e "$FLUXIONVLine $FLUXIONEmptyOrNonExistentHashError"
@@ -1678,7 +1717,10 @@ fluxion_hash_get_path() {
   while true; do
     fluxion_hash_unset_path
     if ! fluxion_hash_set_path "$@"; then
+      echo "Failed to set hash path." > $FLUXIONOutputDevice
       return -1 # WARNING: The recent error code is NOT contained in $? here!
+    else
+      echo "Hash path: \"$FluxionHashPath\"" > $FLUXIONOutputDevice
     fi
 
     if fluxion_hash_verify "$FluxionHashPath" "$2" "$3"; then
